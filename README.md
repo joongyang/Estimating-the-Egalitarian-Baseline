@@ -45,6 +45,7 @@ from udrud_framework import estimate_gamma, calculate_ud_rud_metrics
 # Load your locally saved, formatted dataset
 df = pd.read_csv("data.csv")
 
+# Equivalise survey weights and income (e.g., using the square root of household size)
 df["weight"] = df["weight"] * df["size"]
 df["income"] = df["income"] / np.sqrt(df["size"])
 
@@ -62,7 +63,6 @@ gamma_hat, optimal_k, plateau_series = estimate_gamma(y_raw, weights, p=0.05)
 
 print(f"Optimal k^*: {optimal_k}")
 print(f"Estimated Egalitarian Baseline (Gamma): {gamma_hat}")
-# Equivalise survey weights and income (e.g., using the square root of household size)
 ```
 
 ### 3. Calculating Inequality Indices
