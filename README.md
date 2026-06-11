@@ -45,9 +45,44 @@ from udrud_framework import estimate_gamma, calculate_ud_rud_metrics
 # Load your locally saved, formatted dataset
 df = pd.read_csv("data.csv")
 
-# Equivalise survey weights and income (e.g., using the square root of household size)
 df["weight"] = df["weight"] * df["size"]
 df["income"] = df["income"] / np.sqrt(df["size"])
 
 y_raw = df['income'].values
 weights = df['weight'].values
+```
+
+### 2. Estimating the Egalitarian Baseline ($\gamma$)
+
+The estimate_gamma function executes the weight calibration and Cluster-Jackknife algorithms to find the optimal truncation parameter ($k^*$) and the true egalitarian baseline.
+
+```python
+# Estimate the minimum threshold using a 5% tail mass target
+gamma_hat, optimal_k, plateau_series = estimate_gamma(y_raw, weights, p=0.05)
+
+print(f"Optimal k^*: {optimal_k}")
+print(f"Estimated Egalitarian Baseline (Gamma): {gamma_hat}")
+# Equivalise survey weights and income (e.g., using the square root of household size)
+```
+
+### 3. Calculating Inequality Indices
+   
+Once the baseline is established, the calculate_ud_rud_metrics function evaluates the true structural disparity, returning both conventional metrics and the UD/RUD norm indices.
+
+```python
+# Calculate inequality metrics
+indices = calculate_ud_rud_metrics(y_raw, weights, gamma_hat)
+
+for metric, value in indices.items():
+    print(f"{metric}: {value:.4f}")
+```
+
+## Citation and Reference
+
+If you utilize this code or the UD/RUD framework in your research, please cite the foundational manuscript:
+
+[Authors pending double-blind review]. "Estimating the Egalitarian Baseline: An Empirical Re-evaluation of Income Inequality via the UD/RUD Framework." Review of Income and Wealth (Under Review).
+
+## License
+
+This project is licensed under the MIT License - see the LICENSE file for details.
