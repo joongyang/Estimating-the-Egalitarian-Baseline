@@ -79,6 +79,34 @@ def get_unique_support(y, w):
     support = support.sort_values('y').reset_index(drop=True)
     return support['y'].values
 
+def calculate_k_max(y, w, p=0.05):
+    """
+    Calculates the maximum truncation parameter (k_max) based on the target tail depth (p).
+    
+    Parameters:
+    y : array-like - raw income values
+    w : array-like - survey weights
+    p : float - target tail depth proportion (default: 0.05)
+    
+    Returns:
+    int : The optimal maximum index (k_max) for the unique support points.
+    """
+    y = np.array(y)
+    w = np.array(w)
+    
+    N = np.sum(w)
+    target_weight = p * N
+    
+    # Aggregate into unique support points and calculate cumulative weights
+    df = pd.DataFrame({'y': y, 'w': w})
+    support_w = df.groupby('y')['w'].sum().sort_index()
+    cum_w = support_w.cumsum().values
+    
+    # Find the maximum k where cumulative weight <= target_weight
+    k_max = np.searchsorted(cum_w, target_weight, side='right')
+    
+    return k_max
+
 def estimate_gamma_for_k(y, w, k):
     """Calculates gamma for a specific truncation parameter k."""
     # Now expecting only one return value
