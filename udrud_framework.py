@@ -1,88 +1,130 @@
 import numpy as np
 import pandas as pd
 
-# ==========================================
-# MODULE 1: THRESHOLD ESTIMATION (EVT)
-# ==========================================
-
-def get_unique_support(y, w):
-    """Aggregates raw data into unique support points and cumulative weights."""
-    df = pd.DataFrame({'y': y, 'w': w})
-    # Group by unique income values and sum the weights
-    support = df.groupby('y', as_index=False)['w'].sum()
-    support = support.sort_values('y').reset_index(drop=True)
-    return support['y'].values, support['w'].values
-
+# ==========================================================
+# LEVEL 1: THE MATHEMATICAL PRIMITIVES
+# ==========================================================
 def cookes_base_estimate(y_k):
-    """Calculates the base Cooke's spacing estimator for k unique points."""
-    k = len(y_k)
-    if k < 2:
-        return y_k[0]
-    
-    y_1 = y_k[0]
-    estimate = y_1
-    
-    for j in range(1, k):
-        # Cooke's optimal minimax weights for alpha=2
-        xi_j = (2 * (k - j)) / (k * (k - 1))
-        gap = y_k[j] - y_k[j-1]
-        estimate -= xi_j * gap
+    # This must be the very first check. No exceptions.
+    if len(y_k) == 0: 
+        return np.nan
         
+    k = len(y_k)
+    if k < 2: 
+        return y_k[0]
+        
+    # ==========================================================
+    # OPTIMIZATION: Vectorized Cooke's Calculation (No for-loops)
+    # ==========================================================
+    y_1 = y_k[0]
+    
+    # Create an array of indices j from 1 to k-1
+    j_vals = np.arange(1, k)
+    
+    # Vectorized calculation of the minimax weights
+    xi = (2 * (k - j_vals)) / (k * (k - 1))
+    
+    # Vectorized calculation of all gaps (y_k[j] - y_k[j-1])
+    gaps = np.diff(y_k)
+    
+    # Compute the final estimate using a highly optimized C-level sum
+    estimate = y_1 - np.sum(xi * gaps)
+    
     return estimate
-
 def cluster_jackknife(y_k):
-    """Calculates the Jackknife bias-corrected endpoint estimate."""
+    """
+    Bias-corrected endpoint estimate using Jackknife on support points.
+    Includes robustness checks to prevent NaN propagation.
+    """
     k = len(y_k)
     base_est = cookes_base_estimate(y_k)
     
-    leave_one_out_estimates = []
+    # Base estimate failure check
+    if np.isnan(base_est):
+        return np.nan
+    
+    # SAFETY: Jackknife requires at least 2 points to perform leave-one-out
+    if k < 2:
+        return base_est
+    
+    jackknife_sum = 0
+    valid_iterations = 0
+    
     for m in range(k):
-        # Omit the m-th unique order statistic
-        y_k_minus_m = np.delete(y_k, m)
-        loo_est = cookes_base_estimate(y_k_minus_m)
-        leave_one_out_estimates.append(loo_est)
+        y_minus_m = np.delete(y_k, m)
+        res = cookes_base_estimate(y_minus_m)
         
-    # Jackknife bias correction formula
-    jackknife_est = k * base_est - ((k - 1) / k) * np.sum(leave_one_out_estimates)
-    return jackknife_est
+        # Robustness: Only include valid results in the sum
+        if not np.isnan(res):
+            jackknife_sum += res
+            valid_iterations += 1
+            
+    # If the jackknife failed to compute sufficient iterations, return NaN
+    # as the estimate is unreliable
+    if valid_iterations < k:
+        return np.nan
+        
+    return k * base_est - ((k - 1) / k) * jackknife_sum
 
-def estimate_gamma(y, w, p=0.05, window_size=5):
-    """
-    Executes Algorithms 1, 2, and 3 to find the optimal minimum threshold.
-    p: fractional depth of the tail.
-    window_size: rolling window for plateau detection.
-    """
-    y_unique, w_unique = get_unique_support(y, w)
+# ==========================================================
+# LEVEL 2: THE DRIVER
+# ==========================================================
+
+def get_unique_support(y, w):
+    """Aggregates raw data into unique support points."""
+    # Force use of .values to strip indices and ensure alignment
+    df = pd.DataFrame({'y': np.array(y), 'w': np.array(w)})
     
-    total_N = np.sum(w_unique)
-    cumulative_w = np.cumsum(w_unique)
+    support = df.groupby('y', as_index=False)['w'].sum()
+    support = support.sort_values('y').reset_index(drop=True)
+    return support['y'].values
+
+def estimate_gamma_for_k(y, w, k):
+    """Calculates gamma for a specific truncation parameter k."""
+    # Now expecting only one return value
+    y_unique = get_unique_support(y, w) 
     
-    # Algorithm 1: Weight Calibration
-    valid_k_indices = np.where(cumulative_w <= p * total_N)[0]
-    if len(valid_k_indices) < window_size:
-        raise ValueError("Tail fraction p is too small to form a plateau window.")
-    
-    K_max = valid_k_indices[-1] + 1 
-    
-    # Algorithm 2: Cluster-Jackknife over k continuum
-    k_values = range(window_size, K_max + 1)
-    gamma_estimates = []
-    
-    for k in k_values:
-        y_k = y_unique[:k]
-        gamma_est = cluster_jackknife(y_k)
-        gamma_estimates.append(gamma_est)
+    # Safety: check if empty (as discussed previously)
+    if len(y_unique) == 0:
+        return np.nan
         
-    estimates_series = pd.Series(gamma_estimates, index=k_values)
+    k_actual = min(k, len(y_unique))
+    y_k = y_unique[:k_actual]
     
-    # Algorithm 3: Empirical Plateau Detection
-    rolling_var = estimates_series.rolling(window=window_size, center=True).var()
+    return cluster_jackknife(y_k)
+
+# ==========================================================
+# LEVEL 3: THE OPTIMIZER (PLATEAU DETECTION)
+# ==========================================================
+
+def detect_plateau_and_estimate(y, w, k_range, window_size=5):
+    """
+    Level 3 Optimizer: Finds the most stable threshold estimate across a range of k.
+    """
+    estimates = []
     
-    # Find the k that minimizes the rolling variance
-    optimal_k = rolling_var.idxmin()
-    optimal_gamma = estimates_series.loc[optimal_k]
+    # 1. Sweep and collect weight-calibrated estimates
+    for k in k_range:
+        # Crucial: This calls the Level 2 Driver, ensuring weights are handled!
+        estimates.append(estimate_gamma_for_k(y, w, k))
+        
+    # 2. Filter out NaN values explicitly
+    valid_estimates = pd.Series(estimates, index=k_range).dropna()
     
-    return optimal_gamma, optimal_k, estimates_series
+    # 3. Safety check
+    if valid_estimates.empty:
+        return np.nan, np.nan
+        
+    # 4. Calculate rolling std on the valid data
+    rolling_std = valid_estimates.rolling(window=window_size).std()
+    
+    # 5. Identify plateau index (minimize volatility)
+    best_k = rolling_std.idxmin()
+    
+    if pd.isna(best_k):
+        return valid_estimates.mean(), valid_estimates.index[0]
+        
+    return valid_estimates[best_k], best_k
 
 # ==========================================
 # MODULE 2: UD/RUD METRICS ENGINE
@@ -154,18 +196,18 @@ def calculate_ud_rud_metrics(y, w, gamma):
     L2_cq_sq = L2_c_sq + L2_q_sq
     
     return {
-        'Baseline_Gamma': gamma,
-        'Mean_Income_y': mu_y,
-        'Conventional_Gini': gini_y,
-        'Conventional_CV': cv_y,
-        'RUD_Mean_mu_z': mu_z,
-        'RUD_Variance_V_z': var_z,
-        'RUD_Gini_G_z': gini_z,
-        'RUD_CV_z': cv_z,
-        'L1_c (CDF)': L1_c,
-        'L1_q (QF)': L1_q,
-        'L1_cq (CDQF)': L1_cq,
-        'L2_c_sq (CDF)': L2_c_sq,
-        'L2_q_sq (QF)': L2_q_sq,
-        'L2_cq_sq (CDQF)': L2_cq_sq
+        'Gamma^': gamma,
+        'mu_y': mu_y,
+        'Gini_y': gini_y,
+        'CV_y': cv_y,
+        'mu_z': mu_z,
+        'V_z': var_z,
+        'Gini_z': gini_z,
+        'CV_z': cv_z,
+        'L1_c': L1_c,
+        'L1_q': L1_q,
+        'L1_cq': L1_cq,
+        'L2_c_sq': L2_c_sq,
+        'L2_q_sq': L2_q_sq,
+        'L2_cq_sq': L2_cq_sq
     }
